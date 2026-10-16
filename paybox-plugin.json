@@ -1,0 +1,7 @@
+{
+  "tool": "quote_invoice",
+  "arguments": {
+    "amount": "50000",
+    "currency": "NGN"
+  }
+}
