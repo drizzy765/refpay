@@ -5,6 +5,7 @@
 //           base-mainnet.g.alchemy.com. Alchemy documents header auth at
 //           https://www.alchemy.com/docs/how-to-use-api-keys-in-http-headers
 // Method:   alchemy_getAssetTransfers  (Base supports categories "external" and "erc20")
+import * as z from "zod/v4";
 import { HOSTS, USDC_BASE, settings } from "../config.js";
 import { fetchJson } from "./http.js";
 
@@ -23,36 +24,75 @@ export interface Transfer {
   timestamp: string | null;
 }
 
-/**
- * TODO(agent): implement with ONE JSON-RPC call:
- *   { jsonrpc: "2.0", id: 1, method: "alchemy_getAssetTransfers", params: [{
- *       fromBlock: "0x0", toBlock: "latest",
- *       fromAddress?: addr, toAddress?: addr,
- *       contractAddresses?: [USDC_BASE],         // omit for incoming-dust scan (fake tokens matter)
- *       category: ["erc20"],                     // add "external" if you also want ETH dust
- *       withMetadata: true, excludeZeroValue: false,  // zero-value transfers ARE the poisoning signal
- *       maxCount: "0x" + settings().historyCount.toString(16), order: "desc" }] }
- * Map result.transfers[] -> Transfer (lowercase addresses, parseInt(blockNum, 16),
- * rawContract.address as token, metadata.blockTimestamp as timestamp).
- * Headers: devAuthHeader() pattern like groq.ts (REFPAY_DEV_ALCHEMY_KEY) for local runs only.
- */
+const rpcResponse = z.object({
+  result: z.unknown().optional(),
+  error: z.object({ code: z.number().optional(), message: z.string().optional() }).optional(),
+});
+
+/** One JSON-RPC call to Alchemy. Errors surface as thrown Error (callers degrade gracefully). */
+async function rpc(method: string, params: unknown[]): Promise<unknown> {
+  const json = rpcResponse.parse(
+    await fetchJson(ALCHEMY_URL, {
+      method: "POST",
+      body: { jsonrpc: "2.0", id: 1, method, params },
+      headers: devAuthHeader(),
+    }),
+  );
+  if (json.error) throw new Error(`Alchemy ${method}: ${json.error.message ?? json.error.code ?? "RPC error"}`);
+  return json.result;
+}
+
+const transferItem = z.object({
+  from: z.string(),
+  to: z.string().nullable(),
+  value: z.union([z.number(), z.string()]).nullable(),
+  asset: z.string().nullable(),
+  hash: z.string(),
+  blockNum: z.string(),
+  rawContract: z.object({ address: z.string().nullable() }).optional(),
+  metadata: z.object({ blockTimestamp: z.string().nullable() }).optional(),
+});
+
+const assetTransfersResult = z.object({ transfers: z.array(transferItem) });
+
 export async function getTransfers(opts: {
   fromAddress?: string;
   toAddress?: string;
   usdcOnly: boolean;
 }): Promise<Transfer[]> {
-  void opts; void USDC_BASE; void settings; void fetchJson; void ALCHEMY_URL;
-  throw new Error("TODO: getTransfers not implemented");
+  const params: Record<string, unknown> = {
+    fromBlock: "0x0",
+    toBlock: "latest",
+    category: ["erc20"],
+    withMetadata: true,
+    excludeZeroValue: false, // zero-value transfers ARE the poisoning signal
+    maxCount: `0x${settings().historyCount.toString(16)}`,
+    order: "desc",
+  };
+  if (opts.fromAddress) params.fromAddress = opts.fromAddress;
+  if (opts.toAddress) params.toAddress = opts.toAddress;
+  if (opts.usdcOnly) params.contractAddresses = [USDC_BASE];
+
+  const result = await rpc("alchemy_getAssetTransfers", [params]);
+  const parsed = assetTransfersResult.parse(result);
+  return parsed.transfers.map((t) => ({
+    from: t.from.toLowerCase(),
+    to: t.to ? t.to.toLowerCase() : null,
+    value: typeof t.value === "number" ? t.value : t.value === null ? null : Number(t.value),
+    token: t.rawContract?.address ? t.rawContract.address.toLowerCase() : null,
+    asset: t.asset,
+    hash: t.hash,
+    blockNum: parseInt(t.blockNum, 16),
+    timestamp: t.metadata?.blockTimestamp ?? null,
+  }));
 }
 
-/**
- * TODO(agent): eth_getTransactionByHash -> return `input` hex (for decodeReferenceFromInput).
- * Only needed by verify_invoice_paid. Cap at 5 lookups per call to respect the 10 s budget,
- * or batch them in one JSON-RPC array request.
- */
+const txObject = z.object({ input: z.string() }).nullable();
+
 export async function getTxInput(hash: string): Promise<string | null> {
-  void hash;
-  throw new Error("TODO: getTxInput not implemented");
+  const result = await rpc("eth_getTransactionByHash", [hash]);
+  const parsed = txObject.parse(result);
+  return parsed?.input ?? null;
 }
 
 export function devAuthHeader(): Record<string, string> {
