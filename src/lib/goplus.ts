@@ -7,6 +7,7 @@
 //     fake_kyc: "0", mixer: "0", financial_crime: "0", darkweb_transactions: "0", blackmail_activities: "0",
 //     malicious_mining_activities: "0", fake_token: "0", fake_standard_interface: "0", gas_abuse: "0",
 //     reinit: "0", number_of_malicious_contracts_created: "0", contract_address: "1"|"0", data_source: "" } }
+import * as z from "zod/v4";
 import { BASE_CHAIN_ID, HOSTS } from "../config.js";
 import { fetchJson } from "./http.js";
 
@@ -27,14 +28,19 @@ export interface GoPlusResult {
   isContract: boolean;
 }
 
-/**
- * TODO(agent): implement.
- * fetchJson(`https://${HOSTS.goplus}/api/v1/address_security/${address}?chain_id=${BASE_CHAIN_ID}`)
- * - require code === 1, else throw
- * - collect flags whose value === "1"; treat number_of_malicious_contracts_created > 0 as suspicious
- * - isContract = result.contract_address === "1"
- */
+const goplusResponse = z.object({
+  code: z.number(),
+  result: z.record(z.string(), z.unknown()),
+});
+
 export async function addressSecurity(address: string): Promise<GoPlusResult> {
-  void address; void BASE_CHAIN_ID; void HOSTS; void fetchJson;
-  throw new Error("TODO: addressSecurity not implemented");
+  const json = await fetchJson(`https://${HOSTS.goplus}/api/v1/address_security/${address}?chain_id=${BASE_CHAIN_ID}`);
+  const parsed = goplusResponse.parse(json);
+  if (parsed.code !== 1) throw new Error(`GoPlus returned code ${parsed.code}`);
+  const r = parsed.result;
+  const blockFlags: string[] = GOPLUS_BLOCK_FLAGS.filter((f) => r[f] === "1");
+  const suspiciousFlags: string[] = GOPLUS_SUSPICIOUS_FLAGS.filter((f) => r[f] === "1");
+  const maliciousContracts = Number(r["number_of_malicious_contracts_created"] ?? "0");
+  if (Number.isFinite(maliciousContracts) && maliciousContracts > 0) suspiciousFlags.push("malicious_contracts");
+  return { blockFlags, suspiciousFlags, isContract: r["contract_address"] === "1" };
 }
