@@ -7,8 +7,9 @@
 // Model:     default "openai/gpt-oss-20b" (Groq's recommended replacement after
 //            llama-3.1-8b-instant was shut down 2026-08-16). Override with env REFPAY_GROQ_MODEL.
 // Budget:    GROQ_TIMEOUT_MS (4 s). On timeout/failure, parse_invoice falls back to regex extraction.
+import * as z from "zod/v4";
 import { GROQ_TIMEOUT_MS, HOSTS, settings } from "../config.js";
-import { fetchJson } from "./http.js";
+import { fetchJson, UpstreamError } from "./http.js";
 
 export const GROQ_URL = `https://${HOSTS.groq}/openai/v1/chat/completions`;
 
@@ -33,19 +34,48 @@ export interface GroqInvoiceJson {
   description?: unknown;
 }
 
-/**
- * TODO(agent): implement.
- * - body: { model: settings().groqModel, temperature: 0, max_completion_tokens: 400,
- *           response_format: { type: "json_object" },
- *           messages: [{ role: "system", content: INVOICE_SYSTEM_PROMPT }, { role: "user", content: text }] }
- *   For gpt-oss models you may add reasoning_effort: "low" (check Groq docs; drop it if Groq returns 400).
- * - fetchJson(GROQ_URL, { method: "POST", body, timeoutMs: GROQ_TIMEOUT_MS, headers: devAuthHeader() })
- * - read choices[0].message.content, JSON.parse it, return as GroqInvoiceJson.
- * - throw on any failure; the tool falls back to regexExtract().
- */
+const chatCompletion = z.object({
+  choices: z.array(z.object({ message: z.object({ content: z.string() }) })).min(1),
+});
+
 export async function callGroqJson(text: string): Promise<GroqInvoiceJson> {
-  void text; void GROQ_URL; void GROQ_TIMEOUT_MS; void settings; void fetchJson;
-  throw new Error("TODO: callGroqJson not implemented");
+  const messages = [
+    { role: "system", content: INVOICE_SYSTEM_PROMPT },
+    { role: "user", content: text },
+  ];
+  const base = {
+    model: settings().groqModel,
+    temperature: 0,
+    max_completion_tokens: 400,
+    response_format: { type: "json_object" as const },
+  };
+  const headers = devAuthHeader();
+  let raw: unknown;
+  try {
+    raw = await fetchJson(GROQ_URL, {
+      method: "POST",
+      body: { ...base, reasoning_effort: "low", messages },
+      timeoutMs: GROQ_TIMEOUT_MS,
+      headers,
+    });
+  } catch (e) {
+    // gpt-oss models reject reasoning_effort with HTTP 400; retry once without it.
+    if (e instanceof UpstreamError && e.message === "HTTP 400") {
+      raw = await fetchJson(GROQ_URL, {
+        method: "POST",
+        body: { ...base, messages },
+        timeoutMs: GROQ_TIMEOUT_MS,
+        headers,
+      });
+    } else {
+      throw e;
+    }
+  }
+  const parsed = chatCompletion.parse(raw);
+  const content = parsed.choices[0]!.message.content;
+  const obj = JSON.parse(content) as GroqInvoiceJson;
+  if (typeof obj !== "object" || obj === null) throw new Error("Groq returned non-object JSON");
+  return obj;
 }
 
 /**
