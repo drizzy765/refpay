@@ -3,9 +3,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { USDC_BASE } from "../src/config.ts";
-import { getTransfers, getTxInput } from "../src/lib/alchemy.ts";
+import { devAuthHeader as alchemyDevAuth, getTransfers, getTxInput } from "../src/lib/alchemy.ts";
 import { addressSecurity } from "../src/lib/goplus.ts";
-import { callGroqJson } from "../src/lib/groq.ts";
+import { callGroqJson, devAuthHeader as groqDevAuth } from "../src/lib/groq.ts";
 import { runSentinel } from "../src/lib/sentinel.ts";
 
 const PAYER = "0x1111111111111111111111111111111111111111";
@@ -191,4 +191,47 @@ test("Sentinel: dust bait from a never-paid payee scores HIGH (not LOW)", async 
     assert.equal(r.level, "HIGH");
     assert.equal(r.reasons.some((x) => x.code === "DUST_FROM_PAYEE"), true);
   });
+});
+
+// Hosted mode: no dev env vars, so no Authorization header is sent (PayBox injects it).
+test("hosted: no Groq Authorization header without REFPAY_DEV_GROQ_KEY", () => {
+  const saved = process.env.REFPAY_DEV_GROQ_KEY;
+  delete process.env.REFPAY_DEV_GROQ_KEY;
+  try {
+    assert.deepEqual(groqDevAuth(), {});
+  } finally {
+    if (saved !== undefined) process.env.REFPAY_DEV_GROQ_KEY = saved;
+  }
+});
+
+test("local dev: Groq Authorization header only when REFPAY_DEV_GROQ_KEY is set", () => {
+  const saved = process.env.REFPAY_DEV_GROQ_KEY;
+  process.env.REFPAY_DEV_GROQ_KEY = "local-test-key";
+  try {
+    assert.deepEqual(groqDevAuth(), { Authorization: "Bearer local-test-key" });
+  } finally {
+    if (saved !== undefined) process.env.REFPAY_DEV_GROQ_KEY = saved;
+    else delete process.env.REFPAY_DEV_GROQ_KEY;
+  }
+});
+
+test("hosted: no Alchemy Authorization header without REFPAY_DEV_ALCHEMY_KEY", () => {
+  const saved = process.env.REFPAY_DEV_ALCHEMY_KEY;
+  delete process.env.REFPAY_DEV_ALCHEMY_KEY;
+  try {
+    assert.deepEqual(alchemyDevAuth(), {});
+  } finally {
+    if (saved !== undefined) process.env.REFPAY_DEV_ALCHEMY_KEY = saved;
+  }
+});
+
+test("local dev: Alchemy Authorization header only when REFPAY_DEV_ALCHEMY_KEY is set", () => {
+  const saved = process.env.REFPAY_DEV_ALCHEMY_KEY;
+  process.env.REFPAY_DEV_ALCHEMY_KEY = "local-test-key";
+  try {
+    assert.deepEqual(alchemyDevAuth(), { Authorization: "Bearer local-test-key" });
+  } finally {
+    if (saved !== undefined) process.env.REFPAY_DEV_ALCHEMY_KEY = saved;
+    else delete process.env.REFPAY_DEV_ALCHEMY_KEY;
+  }
 });
