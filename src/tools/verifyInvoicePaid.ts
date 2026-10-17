@@ -1,7 +1,19 @@
-// verify_invoice_paid (optional, do last): find a payer->payee USDC transfer carrying the reference. STUB.
+// verify_invoice_paid: find a payer->payee USDC transfer carrying the invoice reference
+// (decodeReferenceFromInput), else fall back to matching the quoted USDC amount.
 import type { McpServer } from "@modelcontextprotocol/server";
-import { fail } from "../lib/result.js";
+import { getTransfers, getTxInput } from "../lib/alchemy.js";
+import { log } from "../lib/http.js";
+import { decodeReferenceFromInput } from "../lib/memo.js";
+import { fail, ok } from "../lib/result.js";
 import { verifyPaidInput, verifyPaidOutput } from "../schemas.js";
+
+const EXPLORER = "https://basescan.org/tx/";
+
+/** Decimal number -> USDC string with at most 6 decimals and no trailing zeros. */
+function formatUsdc(value: number | null): string | null {
+  if (value === null || !Number.isFinite(value)) return null;
+  return value.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+}
 
 export function register(server: McpServer) {
   server.registerTool(
@@ -15,14 +27,61 @@ export function register(server: McpServer) {
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
     async ({ payer, payee, reference, usdcAmount }) => {
-      // TODO(agent):
-      // 1. getTransfers({ fromAddress: payer, usdcOnly: true }) and keep t.to === payee (lowercase).
-      // 2. For up to 5 newest matches: getTxInput(hash) -> decodeReferenceFromInput(input).
-      //    reference match -> { paid: true, matchedBy: "reference", ... }
-      // 3. Else if usdcAmount given and a transfer value equals it -> matchedBy: "amount".
-      // 4. explorerUrl: `https://basescan.org/tx/${hash}`.
-      void payer; void payee; void reference; void usdcAmount;
-      return fail("verify_invoice_paid is not implemented yet.");
+      let transfers;
+      try {
+        transfers = await getTransfers({ fromAddress: payer, usdcOnly: true });
+      } catch (e) {
+        log(`verify history: ${e instanceof Error ? e.message : "error"}`);
+        return fail("Could not read payment history from Alchemy. Retry explicitly.");
+      }
+
+      const payeeL = payee.toLowerCase();
+      const matches = transfers.filter((t) => t.to?.toLowerCase() === payeeL);
+
+      // Reference match: inspect the input of the 5 newest payer->payee transfers.
+      const recent = matches.slice(0, 5);
+      const inputs = await Promise.all(recent.map((t) => getTxInput(t.hash).catch(() => null)));
+      for (let i = 0; i < recent.length; i++) {
+        const t = recent[i]!;
+        if (inputs[i] && decodeReferenceFromInput(inputs[i]!) === reference) {
+          return ok(`Paid: reference "${reference}" found in ${t.hash}.`, {
+            paid: true,
+            matchedBy: "reference",
+            txHash: t.hash,
+            blockNumber: t.blockNum,
+            usdcAmount: formatUsdc(t.value),
+            explorerUrl: `${EXPLORER}${t.hash}`,
+            checkedTransfers: matches.length,
+          });
+        }
+      }
+
+      // Amount fallback: reference absent, but a transfer amount equals the quote.
+      if (usdcAmount !== undefined) {
+        const target = Number(usdcAmount);
+        const amountMatch = matches.find((t) => t.value !== null && Math.abs(t.value - target) < 1e-9);
+        if (amountMatch) {
+          return ok(`Paid: matched ${usdcAmount} USDC to payee in ${amountMatch.hash}.`, {
+            paid: true,
+            matchedBy: "amount",
+            txHash: amountMatch.hash,
+            blockNumber: amountMatch.blockNum,
+            usdcAmount,
+            explorerUrl: `${EXPLORER}${amountMatch.hash}`,
+            checkedTransfers: matches.length,
+          });
+        }
+      }
+
+      return ok(`No USDC payment from payer to payee found (checked ${matches.length} transfer(s)).`, {
+        paid: false,
+        matchedBy: "none",
+        txHash: null,
+        blockNumber: null,
+        usdcAmount: null,
+        explorerUrl: null,
+        checkedTransfers: matches.length,
+      });
     },
   );
 }
