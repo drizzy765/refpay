@@ -1,7 +1,9 @@
 {
-  "tool": "quote_invoice",
+  "tool": "pay_invoice",
   "arguments": {
-    "amount": "50000",
-    "currency": "NGN"
+    "payer": "0x1111111111111111111111111111111111111111",
+    "payee": "0x2222222222222222222222222222222222222222",
+    "usdcAmount": "1.13",
+    "reference": "INV-2026-0042"
   }
 }
